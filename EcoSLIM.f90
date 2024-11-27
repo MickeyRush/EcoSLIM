@@ -93,7 +93,7 @@ real*8,allocatable::P(:,:)
         ! P(np,7) = Particle source (1=IC, 2=rain, 3=snowmelt...)
         ! P(np,8) = Particle Status (1=active, 0=inactive)
         ! P(np,9) = concentration
-        ! P(np,10) = Exit status (1=surface outflow, 2=ET, 3=subsurface outflow)
+        ! P(np,10) = Exit status (1=surface outflow, 2=ET, 3=subsurface outflow, 4=well outflow)
         ! P(np,11) = Particle Number (This is a unique integer identifier for the particle)
         ! P(np,12) = Partical Initial X coordinate [L]
         ! P(np,13) = Partical Initial Y coordinate [L]
@@ -281,7 +281,8 @@ real*8 denh2o, moldiff, Efract  !, ran1
 real*8, allocatable::ET_age(:,:), ET_comp(:,:), water_balance(:,:), ET_mass(:)
 real*8, allocatable::Surf_age(:,:), Surf_mass(:,:), Surf_comp(:,:)
 real*8, allocatable::Subsurf_age(:,:), Subsurf_mass(:,:), Subsurf_comp(:,:)
-integer, allocatable:: ET_np(:), Surf_np(:), Subsurf_np(:)
+real*8, allocatable::Well_age(:,:), Well_mass(:), Well_comp(:,:)
+integer, allocatable:: ET_np(:), Surf_np(:), Subsurf_np(:), Well_np(:)
 
 
 real*8  ET_dt, DR_Temp
@@ -454,7 +455,8 @@ nzclm = 13+nCLMsoil ! CLM output is 13+nCLMsoil layers for different variables n
 
 !  number of things written to C array, hard wired at 2 now for Testing
 !n_constituents = 5
-n_constituents = 9
+!n_constituents = 9
+n_constituents = 13  ! additional 4 for Well 
 !allocate arrays
 allocate(PInLoc(np,3))
 allocate(Sx(nx,ny),Sy(nx,ny), DEM(nx,ny))
@@ -525,6 +527,12 @@ Subsurf_age = 0.0d0
 Subsurf_mass = 0.0d0
 Subsurf_comp = 0.0d0
 Subsurf_np = 0
+
+allocate(Well_age(pfnt,5), Well_comp(pfnt,3), Well_mass(pfnt), Well_np(pfnt))
+Well_age = 0.0d0
+Well_mass = 0.0d0
+Well_comp = 0.0d0
+Well_np = 0
 
 ! clear out output particles
 npout = 0
@@ -980,8 +988,8 @@ write(11,*)
 write(11,*)
 write(11,*) ' **** Transient Simulation Particle Accounting ****'
 write(11,*) ' Timestep PFTimestep OutStep    Time     Mean_Age    Mean_Comp   Mean_Mass  Total_Mass    PrecipIn    ETOut  &
-              NP_PrecipIn NP_ETOut &
-             NP_QOut NP_active_old NP_filtered'
+              WellOut NP_PrecipIn NP_ETOut &
+             NP_WellOut NP_QOut NP_active_old NP_filtered'
 flush(11)
 
 !! open exited particle file and write header
@@ -1355,7 +1363,7 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
                         ! check each direction independently
                         advdt = pfdt
                         if (Vpx /= 0.0d0) advdt(1) = dabs(dtfrac*(dx/Vpx))
-                        if (Vpy /= 0.0d0) advdt(2) = dabs(dtfrac*(dx/Vpy))
+                        if (Vpy /= 0.0d0) advdt(2) = dabs(dtfrac*(dy/Vpy))
                         if (Vpz /= 0.0d0) advdt(3) = dtfrac*(dz(Ploc(3)+1)/dabs(Vpz))
                         !if (Vpx > 0.0d0) advdt(1) = dabs(((1.0d0-Clocx)*dx)/Vpx)
                         !if (Vpx < 0.0d0) advdt(1) = dabs((Clocx*dx)/Vpx)
@@ -1394,6 +1402,8 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
                         if (itime_loc >= pfnt) itime_loc = pfnt
                         Zr = ran1(ir)
                         if (Zr < ((et_flux*particledt)/water_vol)) then   ! check if particle is 'captured' by the roots
+                        !  determine whether flux is ET or well based on depth / layers
+                        if (P(ii,3) >= (Zmax - sum(dz(nz-4:nz)))) then  ! particle is in top four layers 
                         !  this section made atomic since it could inovlve a data race
                         !  that is, each thread can only update the ET arrays one at a time
                         !$OMP ATOMIC
@@ -1427,12 +1437,49 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
                         C(8,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(8,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + P(ii,4)*P(ii,6)  ! mass weighted age
                         !$OMP Atomic
                         C(9,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(9,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + P(ii,7)*P(ii,6)  ! mass weighted contribution
-
                         !  now remove particle from domain
                             P(ii,8) = 0.0d0
                             !flag as exiting via ET
                            P(ii,10) = 2.0d0
+                        else 
+                        !  this section made atomic since it could inovlve a data race
+                        !  that is, each thread can only update the ET arrays one at a time
+                        !$OMP ATOMIC
+                        Well_age(itime_loc,1) = Well_age(itime_loc,1) + P(ii,4)*P(ii,6)  ! mass weighted age
+                        !$OMP ATOMIC
+                        Well_mass(itime_loc) = Well_mass(itime_loc)  +  P(ii,6)  ! particle mass added to ET
 
+                        !ET_comp(itime_loc,1) = ET_comp(itime_loc,1) + P(ii,7)*P(ii,6)  !mass weighted contribution
+                        if (P(ii,7) == 1.0) then
+                        !$OMP ATOMIC
+                        Well_comp(itime_loc,1) = Well_comp(itime_loc,1) + P(ii,6)
+                        end if
+                        if (P(ii,7) == 2.0) then
+                        !$OMP ATOMIC
+                        Well_comp(itime_loc,2) = Well_comp(itime_loc,2) + P(ii,6)
+                        end if
+                        if (P(ii,7) == 3.0) then
+                        !$OMP ATOMIC
+                        Well_comp(itime_loc,3) = Well_comp(itime_loc,3) + P(ii,6)
+                        end if
+
+                        !$OMP ATOMIC
+                        Well_np(itime_loc) = Well_np(itime_loc) + 1   ! track number of particles
+
+                        !outputting spatially distributed Well information
+                        !$OMP Atomic
+                        C(10,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(10,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + 1 ! Number of Well particles
+                        !$OMP Atomic
+                        C(11,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(11,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) +  P(ii,6) ! particle mass added to Well
+                        !$OMP Atomic
+                        C(12,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(12,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + P(ii,4)*P(ii,6)  ! mass weighted age
+                        !$OMP Atomic
+                        C(13,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(13,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + P(ii,7)*P(ii,6)  ! mass weighted contribution
+                        !  now remove particle from domain
+                            P(ii,8) = 0.0d0
+                            !flag as exiting via Well
+                           P(ii,10) = 4.0d0
+                        endif  ! end ET vs. Well if statement
                             goto 999
                         end if
                         end if ! end-if for evaptrans < 0
@@ -1634,9 +1681,28 @@ write(14,*) 'X Y Z ET_npart, ET_mass, ET_age, ET_comp, EvapTrans_Rate, Saturatio
 do i = 1, nx
 do j = 1, ny
 do k = 1, nz
-  if (EvapTrans(i,j,k) < 0.0d0)   &
+  if ((EvapTrans(i,j,k) < 0.0d0) .and. (k >= (nz - 4))) &
   write(14,'(3(i6), 7(e13.5))')  i, j, k, C(6,i,j,k), C(7,i,j,k), C(8,i,j,k), &
        C(9,i,j,k), EvapTrans(i,j,k), Saturation(i,j,k), Porosity(i,j,k)
+end do
+end do
+end do
+close(14)
+end if
+end if
+
+!Write gridded Well outputs to text files
+if(etwrite > 0) then
+if (mod(kk,etwrite) == 0) then
+! open/create/write the 3D output file
+open(14,file=trim(runname)//'_Well_summary.'//trim(adjustl(filenumout))//'.txt')
+write(14,*) 'X Y Z Well_npart, Well_mass, Well_age, Well_comp, Well_Rate, Saturation, Porosity'
+do i = 1, nx
+do j = 1, ny
+do k = 1, nz
+  if ((EvapTrans(i,j,k) < 0.0d0) .and. (k < (nz - 4))) &
+  write(14,'(3(i6), 7(e13.5))')  i, j, k, C(10,i,j,k), C(11,i,j,k), C(12,i,j,k), &
+       C(13,i,j,k), EvapTrans(i,j,k), Saturation(i,j,k), Porosity(i,j,k)
 end do
 end do
 end do
@@ -1815,6 +1881,27 @@ end do
 flush(13)
 ! close ET file
 close(13)
+
+!! write Well files
+!
+open(13,file=trim(runname)//'_Well_output.txt')
+write(13,*) 'TIME Well_age Well_comp1 Well_comp2 Well_comp3 Well_mass Well_Np'
+do ii = 1, pfnt
+if (Well_mass(ii) > 0 ) then
+Well_age(ii,1) = Well_age(ii,1)/(Well_mass(ii))
+Well_comp(ii,1) = Well_comp(ii,1)/(Well_mass(ii))
+Well_comp(ii,2) = Well_comp(ii,2)/(Well_mass(ii))
+Well_comp(ii,3) = Well_comp(ii,3)/(Well_mass(ii))
+end if
+
+write(13,'(6(e12.5),i12)') float(ii+tout1-1)*ET_dt, Well_age(ii,1), Well_comp(ii,1), &
+                            Well_comp(ii,2), Well_comp(ii,3), Well_mass(ii), Well_np(ii)
+
+end do
+flush(13)
+! close Well file
+close(13)
+
 
 !! write surface outflow
 !
