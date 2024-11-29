@@ -988,7 +988,7 @@ write(11,*)
 write(11,*)
 write(11,*) ' **** Transient Simulation Particle Accounting ****'
 write(11,*) ' Timestep PFTimestep OutStep    Time     Mean_Age    Mean_Comp   Mean_Mass  Total_Mass    PrecipIn    ETOut  &
-              WellOut NP_PrecipIn NP_ETOut &
+              NP_PrecipIn NP_ETOut &
              NP_WellOut NP_QOut NP_active_old NP_filtered'
 flush(11)
 
@@ -1263,6 +1263,7 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
 !$OMP& SHARED(kk, pfnt, surf_age, surf_mass, surf_comp, surf_np, dtfrac, et_age, et_mass) &
 !$OMP& SHARED(et_comp, et_np, moldiff, efract, C,ipwrite) &
 !$OMP& SHARED(subsurf_age, subsurf_mass, subsurf_comp, subsurf_np, clmtrans, velfile) &
+!$OMP& SHARED(well_age, well_mass, well_comp, well_np) & 
 !$OMP& Default(private)
 
 ! loop over active particles
@@ -1438,17 +1439,17 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
                         !$OMP Atomic
                         C(9,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(9,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + P(ii,7)*P(ii,6)  ! mass weighted contribution
                         !  now remove particle from domain
-                            P(ii,8) = 0.0d0
-                            !flag as exiting via ET
-                           P(ii,10) = 2.0d0
-                        else 
+                        P(ii,8) = 0.0d0
+                        !flag as exiting via ET
+                        P(ii,10) = 2.0d0
+                        goto 999
+                        else
                         !  this section made atomic since it could inovlve a data race
                         !  that is, each thread can only update the ET arrays one at a time
                         !$OMP ATOMIC
                         Well_age(itime_loc,1) = Well_age(itime_loc,1) + P(ii,4)*P(ii,6)  ! mass weighted age
                         !$OMP ATOMIC
                         Well_mass(itime_loc) = Well_mass(itime_loc)  +  P(ii,6)  ! particle mass added to ET
-
                         !ET_comp(itime_loc,1) = ET_comp(itime_loc,1) + P(ii,7)*P(ii,6)  !mass weighted contribution
                         if (P(ii,7) == 1.0) then
                         !$OMP ATOMIC
@@ -1462,10 +1463,9 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
                         !$OMP ATOMIC
                         Well_comp(itime_loc,3) = Well_comp(itime_loc,3) + P(ii,6)
                         end if
-
                         !$OMP ATOMIC
                         Well_np(itime_loc) = Well_np(itime_loc) + 1   ! track number of particles
-
+                        
                         !outputting spatially distributed Well information
                         !$OMP Atomic
                         C(10,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(10,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + 1 ! Number of Well particles
@@ -1476,15 +1476,14 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
                         !$OMP Atomic
                         C(13,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) = C(13,Ploc(1)+1,Ploc(2)+1,Ploc(3)+1) + P(ii,7)*P(ii,6)  ! mass weighted contribution
                         !  now remove particle from domain
-                            P(ii,8) = 0.0d0
-                            !flag as exiting via Well
-                           P(ii,10) = 4.0d0
-                        endif  ! end ET vs. Well if statement
-                            goto 999
-                        end if
+                        P(ii,8) = 0.0d0
+                        !flag as exiting via Well
+                        P(ii,10) = 4.0d0
+                        goto 999
+                        end if  ! end-if for ET vs. Well
+                        end if ! end-if for captured
                         end if ! end-if for evaptrans < 0
                         end if ! end-if for clmtrans
-
                         ! Advect particle to new location using Euler advection until next time
                         P(ii,1) = P(ii,1) + particledt * Vpx
                         P(ii,2) = P(ii,2) + particledt * Vpy
@@ -1603,7 +1602,6 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
 
                 end do  ! end of do-while loop for particle time to next time
         999 continue   ! where we go if the particle is out of bounds
-
                                 !! concentration routine
                                 ! Find the "adjacent" "cell corresponding to the particle's location
                                 Ploc(1) = floor(P(ii,1) / dx)
@@ -1640,7 +1638,6 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
         parallel_time = parallel_time + (T2-T1)
 
 call system_clock(T1)
-
 
 !! format statements for particle output
 61  FORMAT(4(e12.5))
@@ -1690,6 +1687,11 @@ end do
 close(14)
 end if
 end if
+
+! normalize Well ages by mass
+where (C(11,:,:,:)>0.0)  C(12,:,:,:) = C(12,:,:,:) / C(11,:,:,:)
+where (C(11,:,:,:)>0.0)  C(13,:,:,:) = C(13,:,:,:) / C(11,:,:,:)
+
 
 !Write gridded Well outputs to text files
 if(etwrite > 0) then
@@ -1797,7 +1799,7 @@ end if
   write(11,'(3(i10),3(f12.5),4(1x,e12.5,1x),3(i8),2(i12))') kk, pfkk, outkk, Time_Next(kk), mean_age , mean_comp, mean_mass, &
                                           total_mass,  water_balance(kk,1), water_balance(kk,2), &
                                           i_added_particles,  &
-                                          ET_np(kk), Surf_np(kk), np_active,np_active2
+                                          ET_np(kk), Well_np(kk), Surf_np(kk), np_active,np_active2
   flush(11)
 
 np_active = np_active2
@@ -1893,7 +1895,6 @@ Well_comp(ii,1) = Well_comp(ii,1)/(Well_mass(ii))
 Well_comp(ii,2) = Well_comp(ii,2)/(Well_mass(ii))
 Well_comp(ii,3) = Well_comp(ii,3)/(Well_mass(ii))
 end if
-
 write(13,'(6(e12.5),i12)') float(ii+tout1-1)*ET_dt, Well_age(ii,1), Well_comp(ii,1), &
                             Well_comp(ii,2), Well_comp(ii,3), Well_mass(ii), Well_np(ii)
 
