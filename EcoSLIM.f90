@@ -1640,6 +1640,7 @@ if (mod((kk-1),(pft2-pft1+1)) == 0 )  pfkk = pft1 - 1
 call system_clock(T1)
 
 !! format statements for particle output
+60  FORMAT(4(e12.10))
 61  FORMAT(4(e12.5))
 62  FORMAT(4(e12.5))
 
@@ -1654,7 +1655,7 @@ if(mod(kk,ipwrite) == 0)  then
 open(14,file=trim(runname)//'_transient_particle.'//trim(adjustl(filenumout))//'.3D')
 write(14,*) 'X Y Z TIME ID'
 do ii = 1, np_active
-if (P(ii,8) == 1) write(14,61) P(ii,1), P(ii,2), P(ii,3), P(ii,4), P(ii,11)
+if (P(ii,8) == 1) write(14,60) P(ii,1), P(ii,2), P(ii,3), P(ii,4), P(ii,11)
 end do
 close(14)
 end if
